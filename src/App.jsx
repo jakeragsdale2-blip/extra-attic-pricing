@@ -221,6 +221,8 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [compAI, setCompAI]       = useState("");
   const [compLoading, setCompLoading] = useState(false);
+  const [fetchingRates, setFetchingRates] = useState(false);
+  const [lastFetched, setLastFetched] = useState(()=>localStorage.getItem("ea5_last_fetched")||"");
   const [briefingDate, setBriefingDate] = useState(()=>localStorage.getItem("ea5_briefing_date")||"");
 
   // New entry forms
@@ -384,6 +386,106 @@ Be direct. Dollar amounts required. Max 300 words.`;
     const ourAvg=["5x10","10x10","10x20"].map(uid=>{const v=LOCATIONS.flatMap(l=>allRates[l.id]?.[uid]?.street?[allRates[l.id][uid].street]:[]);return`${uid}=$${v.length?Math.round(v.reduce((a,b)=>a+b)/v.length):0}`;}).join(" ");
     callAI(`Richmond VA storage market. Season:${seasonStatus}\nCompetitors:\n${lines}\nExtra Attic avg:${ourAvg}\n1) Most aggressive competitor, 2) Where we are overpriced, 3) Where to raise rates, 4) Best promo tactic. 200 words.`,"comp",setCompLoading);
   },[compRates,allRates,seasonStatus]);
+
+  // Fetch live market rates via AI web search
+  const fetchMarketRates = async () => {
+    setFetchingRates(true);
+    try {
+      const prompt = `You are helping a storage facility manager in Richmond, VA track competitor pricing. 
+
+Search the web RIGHT NOW for current storage unit prices in Richmond, VA from these specific competitors. Check their websites or aggregator sites like StorageCafe and SpareFoot:
+- Extra Space Storage (Richmond VA locations)
+- Public Storage (Richmond VA locations)  
+- CubeSmart (Richmond VA locations)
+- U-Haul Self Storage (Richmond VA locations)
+- Life Storage (Richmond VA locations)
+- iStorage (Richmond VA locations)
+- Mini Price Storage (Richmond VA locations)
+
+For each competitor, find their current advertised street rates for these unit sizes in Richmond VA:
+5x5, 5x10, 10x10, 10x15, 10x20, climate-controlled 10x10
+
+Also note any current promotions (first month free, etc.)
+
+Return ONLY a valid JSON object, no other text, no markdown, no explanation. Format exactly like this:
+{
+  "fetched_date": "today's date",
+  "market_avg": {
+    "5x5": number,
+    "5x10": number,
+    "10x10": number,
+    "10x15": number,
+    "10x20": number,
+    "cc10x10": number
+  },
+  "competitors": {
+    "extra_space": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"},
+    "public": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"},
+    "cubesmart": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"},
+    "uhaul": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"},
+    "life": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"},
+    "istorage": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"},
+    "mini_price": {"5x5": number, "5x10": number, "10x10": number, "10x15": number, "10x20": number, "cc10x10": number, "promo": "string"}
+  },
+  "source_notes": "brief note about where data came from and how current it is"
+}
+
+Use 0 for any price you cannot find. Use your best estimate from market averages if a specific competitor price is not findable. Today is ${new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}.`;
+
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2000,
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      const data = await res.json();
+      // Extract text from response (may include tool use blocks)
+      const text = data.content?.map(b => b.text || "").filter(Boolean).join("") || "";
+      
+      // Parse JSON from response
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        
+        // Update competitor rates
+        if (parsed.competitors) {
+          setCompRates(prev => {
+            const next = { ...prev };
+            for (const [compId, rates] of Object.entries(parsed.competitors)) {
+              if (next[compId]) {
+                next[compId] = { ...next[compId], ...rates };
+              }
+            }
+            return next;
+          });
+        }
+
+        const fetched = `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`;
+        localStorage.setItem("ea5_last_fetched", fetched);
+        setLastFetched(fetched);
+        
+        // Show source notes as comp AI message
+        if (parsed.source_notes) {
+          setCompAI(`✅ Rates automatically updated from web search.\n\n📋 Source: ${parsed.source_notes}\n\n⏱ Last fetched: ${fetched}\n\nReview the updated competitor table below. Any rates showing as $0 could not be found online — update those manually.`);
+        }
+      } else {
+        setCompAI("⚠️ Fetched data but could not parse rates. The competitor table was not updated — please update manually.");
+      }
+    } catch (e) {
+      setCompAI("❌ Connection error while fetching rates. Please check your internet and try again.");
+    }
+    setFetchingRates(false);
+  };
 
   // Add promo
   const addPromo = () => {
@@ -919,12 +1021,40 @@ Be direct. Dollar amounts required. Max 300 words.`;
         {/* ══════ COMPETITORS ══════ */}
         {tab==="competitors"&&(
           <div className="fade">
+            {/* Auto-fetch banner */}
+            <div style={{...T.card("rgba(96,165,250,0.2)"),borderLeft:"3px solid #60a5fa",marginBottom:"1.25rem"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:"0.75rem"}}>
+                <div>
+                  <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:"0.95rem",color:"#60a5fa",letterSpacing:"0.1em",marginBottom:3}}>🌐 Auto-Fetch Competitor Rates</div>
+                  <div style={{fontSize:"0.75rem",color:"#6b7280",lineHeight:1.6}}>
+                    Click the button to have AI search the web right now and pull current Richmond storage prices into the table below automatically.
+                    {lastFetched&&<span style={{color:"#4b5563",marginLeft:6}}>Last fetched: <span style={{color:"#60a5fa"}}>{lastFetched}</span></span>}
+                  </div>
+                </div>
+                <button
+                  style={{...T.btn("primary"),background:"#60a5fa",color:"#09090f",minWidth:160,flexShrink:0}}
+                  onClick={fetchMarketRates}
+                  disabled={fetchingRates}
+                >
+                  {fetchingRates
+                    ? <><Spinner/>&nbsp;Searching web...</>
+                    : "🌐 Fetch Today's Rates"
+                  }
+                </button>
+              </div>
+              {fetchingRates&&(
+                <div style={{marginTop:"0.75rem",fontSize:"0.75rem",color:"#60a5fa",fontStyle:"italic"}}>
+                  Searching StorageCafe, SpareFoot, and competitor websites for Richmond VA pricing... this takes about 15–20 seconds.
+                </div>
+              )}
+            </div>
+
             <div style={T.aiBox}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"0.8rem",flexWrap:"wrap",gap:"0.5rem"}}>
                 <div style={T.secH()}>🤖 AI Competitive Analysis</div>
-                <button style={T.btn("primary")} onClick={getCompAI} disabled={compLoading}>{compLoading?<><Spinner/>&nbsp;Analyzing...</>:"🔍 Analyze Competition"}</button>
+                <button style={T.btn("primary")} onClick={getCompAI} disabled={compLoading||fetchingRates}>{compLoading?<><Spinner/>&nbsp;Analyzing...</>:"🔍 Analyze Competition"}</button>
               </div>
-              {compAI?<div style={T.aiText}>{compAI}</div>:<div style={{color:"#374151",fontSize:"0.8rem",fontStyle:"italic"}}>Update rates below then click "Analyze Competition" for AI Richmond market intelligence.</div>}
+              {compAI?<div style={T.aiText}>{compAI}</div>:<div style={{color:"#374151",fontSize:"0.8rem",fontStyle:"italic"}}>Fetch rates first, then click "Analyze Competition" for AI Richmond market intelligence.</div>}
             </div>
             <div style={T.card()}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"0.85rem",flexWrap:"wrap",gap:"0.5rem"}}>
